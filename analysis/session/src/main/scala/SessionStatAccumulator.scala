@@ -12,7 +12,10 @@ class SessionStatAccumulator extends AccumulatorV2[String, mutable.HashMap[Strin
   /**
     * 步长,时长统计项
     */
-  val map = new mutable.HashMap[String, Int]
+  val map = new mutable.HashMap[String, Int] {
+
+
+  }
 
   override def isZero: Boolean = map.isEmpty
 
