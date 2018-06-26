@@ -42,11 +42,116 @@ object SessionStat {
     val sessionId2FullInfo = fullInfoMap(userId2ActionRDDAndUserRDD)
 
     // 2 business1: session sept/time rate
-    sessionSeptTimeRate(taskUUID, sparkSession, taskParm, sessionId2FullInfo)
+    //    sessionSeptTimeRate(taskUUID, sparkSession, taskParm, sessionId2FullInfo)
 
     // 3 business2: session 100 sample
     session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
+
+    // 4 business3: category top10 click,order,pay
+    categoryTop10(taskUUID, sparkSession, sessionId2ActionRDD)
   }
+
+  /**
+    * 根据 click,order,pay 获取类别top10
+    *
+    * @param taskUUID
+    * @param sparkSession
+    * @param sessionId2ActionRDD
+    */
+  def categoryTop10(taskUUID: String, sparkSession: SparkSession, sessionId2ActionRDD: RDD[(String, UserVisitAction)]) = {
+    // 过滤没有包含列别的列
+    val sessionId2FilterCategory = sessionId2ActionRDD.filter { case (sessionId, fullInfo) =>
+      var isResult = false
+      if (fullInfo.click_category_id != -1) {
+        isResult = true
+      } else if (fullInfo.order_category_ids != null) {
+        isResult = true
+      } else if (fullInfo.pay_category_ids != null) {
+        isResult = true
+      }
+      isResult
+    }
+
+    // [(click_categoryId,1),(order_categoryId,1),(pay_categoryId,1)]
+    val sessionId2FlatMap = sessionId2FilterCategory.flatMap { case (sessionId, fullInfo) =>
+      val map = new mutable.HashMap[String, Int]
+      if (fullInfo.click_category_id != -1) {
+        val clickKey = Constants.FIELD_CLICK_COUNT + "_" + fullInfo.click_category_id
+        map.put(clickKey, 1)
+      } else if (fullInfo.order_category_ids != null) {
+        for (categoryId <- fullInfo.order_category_ids.split(",")) {
+          val orderKey = Constants.FIELD_ORDER_COUNT + "_" + categoryId
+          map.put(orderKey, map.getOrElse(orderKey, 0) + 1)
+        }
+      } else {
+        for (categoryId <- fullInfo.pay_category_ids.split(",")) {
+          val payKey = Constants.FIELD_PAY_COUNT + "_" + categoryId
+          map.put(payKey, map.getOrElse(payKey, 0) + 1)
+        }
+      }
+      map
+    }
+    // [(click_categoryId,10),(order_categoryId,10),(pay_categoryId,10)]
+    val sessionId2ReduceByKey = sessionId2FlatMap.reduceByKey(_ + _)
+    // [(categoryId,click=10),(categoryId,order=10),(categoryId,pay=10)]
+    val categoryId2ReduceByKey = sessionId2ReduceByKey.map { case (businessKey, count) =>
+      val keys = businessKey.split("_")
+      (keys(1).toLong, keys(0) + "=" + count)
+    }
+
+    // [(categoryId,"click=100,order=100,pay=100")]
+    val categoryId2Info = categoryId2ReduceByKey.reduceByKey { case (value1, value2) =>
+      // click_10,order_10,pay_10
+      val kvMap = new mutable.HashMap[String, Long]()
+
+      def addToMap(splitValue: String) {
+        for (kvStr <- splitValue.split(",")) {
+          // [click,10]
+          val kv = kvStr.split("=")
+          val key = kv(0)
+          val value = kv(1).toLong
+          kvMap.put(key, kvMap.getOrElse(key, 0L) + value)
+        }
+      }
+
+      addToMap(value1)
+      addToMap(value2)
+      val stringbuffer = new StringBuilder
+      for (kv <- kvMap) {
+        stringbuffer.append(kv._1 + "=" + kv._2).append(",")
+      }
+      stringbuffer.toString
+    }
+
+    // 转换为case class CategoryOrder  (CategoryOrder(clickCount, orderCount, payCount), categoryId)
+    val categoryId2OrderClass = categoryId2Info.map { case (categoryId, fullInfo) =>
+      val clickCount = StringUtils.getFieldFromConcatString(fullInfo, ",", Constants.FIELD_CLICK_COUNT).toLong
+      val orderCount = StringUtils.getFieldFromConcatString(fullInfo, ",", Constants.FIELD_ORDER_COUNT).toLong
+      val payCount = StringUtils.getFieldFromConcatString(fullInfo, ",", Constants.FIELD_PAY_COUNT).toLong
+      (CategoryOrder(clickCount, orderCount, payCount), categoryId)
+    }
+
+    // action: 倒序排序取出前十
+    val list = categoryId2OrderClass.sortByKey(false).take(10)
+
+    // 转换为输出mysql case class
+    val top10Category = list.map { case (CategoryOrder(clickCount, orderCount, payCount), categoryId) =>
+      Top10Category(taskUUID, categoryId, clickCount, orderCount, payCount)
+    }
+
+    // 写入mysql
+    import sparkSession.implicits._
+    sparkSession.sparkContext.makeRDD(top10Category)
+      .toDS().write
+      .format("jdbc")
+      .mode(SaveMode.Append)
+      .option("url", ConfigurationManager.config.getString(Constants.JDBC_URL))
+      .option("user", ConfigurationManager.config.getString(Constants.JDBC_USER))
+      .option("password", ConfigurationManager.config.getString(Constants.JDBC_PASSWORD))
+      .option("dbtable", "top10_category")
+      .save()
+  }
+
 
   /**
     * session数据抽取
@@ -56,14 +161,14 @@ object SessionStat {
     * @param sessionId2FullInfo
     */
   def session100Sample(taskUUID: String, sparkSession: SparkSession, sessionId2FullInfo: RDD[(String, String)]): Unit = {
-//    * 根据全量信息 转换key为小时 [datehour:fullInfo]
-//    * 获取每小时的数据 countByKey Map(datehour,count)
-//    * 构建 天,小时->count的数据结构  Map(date,Map(hour,count))
-//    * 计算每天抽取抽取百分比 100 / session数据天数
-//    * 计算每小时抽取session count => (hourCount.toDouble / dayCount) * 天抽取比例
-//    * 根据每天抽取百分比,当天count,每小时count 构建每个小时随机抽取index Map(date,Map(hour,List(randomIndex)) )
-//    * 遍历全量数据，根据每小时抽取索引获取数据
-//    * 写入mysql
+    //    * 根据全量信息 转换key为小时 [datehour:fullInfo]
+    //    * 获取每小时的数据 countByKey Map(datehour,count)
+    //    * 构建 天,小时->count的数据结构  Map(date,Map(hour,count))
+    //    * 计算每天抽取抽取百分比 100 / session数据天数
+    //    * 计算每小时抽取session count => (hourCount.toDouble / dayCount) * 天抽取比例
+    //    * 根据每天抽取百分比,当天count,每小时count 构建每个小时随机抽取index Map(date,Map(hour,List(randomIndex)) )
+    //    * 遍历全量数据，根据每小时抽取索引获取数据
+    //    * 写入mysql
   }
 
 
