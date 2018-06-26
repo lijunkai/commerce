@@ -18,6 +18,7 @@ import scala.collection.mutable
   */
 object SessionStat {
 
+
   def main(args: Array[String]): Unit = {
     // filter params
     val jsonStr = ConfigurationManager.config.getString(Constants.TASK_PARAMS)
@@ -41,6 +42,40 @@ object SessionStat {
     val sessionId2FullInfo = fullInfoMap(userId2ActionRDDAndUserRDD)
 
     // 2 business1: session sept/time rate
+    sessionSeptTimeRate(taskUUID, sparkSession, taskParm, sessionId2FullInfo)
+
+    // 3 business2: session 100 sample
+    session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
+  }
+
+  /**
+    * session数据抽取
+    *
+    * @param taskUUID
+    * @param sparkSession
+    * @param sessionId2FullInfo
+    */
+  def session100Sample(taskUUID: String, sparkSession: SparkSession, sessionId2FullInfo: RDD[(String, String)]): Unit = {
+//    * 根据全量信息 转换key为小时 [datehour:fullInfo]
+//    * 获取每小时的数据 countByKey Map(datehour,count)
+//    * 构建 天,小时->count的数据结构  Map(date,Map(hour,count))
+//    * 计算每天抽取抽取百分比 100 / session数据天数
+//    * 计算每小时抽取session count => (hourCount.toDouble / dayCount) * 天抽取比例
+//    * 根据每天抽取百分比,当天count,每小时count 构建每个小时随机抽取index Map(date,Map(hour,List(randomIndex)) )
+//    * 遍历全量数据，根据每小时抽取索引获取数据
+//    * 写入mysql
+  }
+
+
+  /**
+    * 统计session 步长/时长比例
+    *
+    * @param taskUUID
+    * @param sparkSession
+    * @param taskParm
+    * @param sessionId2FullInfo
+    */
+  def sessionSeptTimeRate(taskUUID: String, sparkSession: SparkSession, taskParm: JSONObject, sessionId2FullInfo: RDD[(String, String)]): Unit = {
     // 2.1 session accumulator
     val sessionStatisticAccumulator = new SessionStatAccumulator
     sparkSession.sparkContext.register(sessionStatisticAccumulator)
@@ -50,6 +85,7 @@ object SessionStat {
     sessionId2Filter.count()
     writeSessionRatioToMysql(sparkSession, taskUUID, sessionStatisticAccumulator.value)
   }
+
 
   /**
     * 计算累加器中的百分比写到mysql
