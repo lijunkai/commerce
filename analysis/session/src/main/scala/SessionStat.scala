@@ -10,6 +10,8 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{SaveMode, SparkSession}
 
 import scala.collection.mutable
+import scala.collection.mutable.{ArrayBuffer, ListBuffer}
+import scala.util.Random
 
 /**
   * 会话相关需求
@@ -41,14 +43,14 @@ object SessionStat {
     // 1.3 full info [sessionId:(sessionInfo,userInfo)]
     val sessionId2FullInfo = fullInfoMap(userId2ActionRDDAndUserRDD)
 
-    // 2 business1: session sept/time rate
-    //    sessionSeptTimeRate(taskUUID, sparkSession, taskParm, sessionId2FullInfo)
+    // business1: session sept/time rate
+    // sessionSeptTimeRate(taskUUID, sparkSession, taskParm, sessionId2FullInfo)
 
-    // 3 business2: session 100 sample
+    // business2: session 100 sample
     session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
 
-    // 4 business3: category top10 click,order,pay
-    categoryTop10(taskUUID, sparkSession, sessionId2ActionRDD)
+    // business3: category top10 click,order,pay
+    // categoryTop10(taskUUID, sparkSession, sessionId2ActionRDD)
   }
 
   /**
@@ -161,14 +163,110 @@ object SessionStat {
     * @param sessionId2FullInfo
     */
   def session100Sample(taskUUID: String, sparkSession: SparkSession, sessionId2FullInfo: RDD[(String, String)]): Unit = {
-    //    * 根据全量信息 转换key为小时 [datehour:fullInfo]
-    //    * 获取每小时的数据 countByKey Map(datehour,count)
-    //    * 构建 天,小时->count的数据结构  Map(date,Map(hour,count))
-    //    * 计算每天抽取抽取百分比 100 / session数据天数
-    //    * 计算每小时抽取session count => (hourCount.toDouble / dayCount) * 天抽取比例
-    //    * 根据每天抽取百分比,当天count,每小时count 构建每个小时随机抽取index Map(date,Map(hour,List(randomIndex)) )
-    //    * 遍历全量数据，根据每小时抽取索引获取数据
-    //    * 写入mysql
+    // 根据全量信息 转换key为小时 [datehour:fullInfo]
+    val hour2FullInfo = sessionId2FullInfo.map { case (_, fullInfo) =>
+      val startTime = StringUtils.getFieldFromConcatString(fullInfo, "\\|", Constants.FIELD_START_TIME)
+      // yyyy-MM-dd_HH,fullInfo
+      (DateUtils.getDateHour(startTime), fullInfo)
+    }
+
+    // 获取每小时的数据 countByKey Map(datehour,count)
+    val hour2CountMap = hour2FullInfo.countByKey()
+
+    // 构建 天,小时->count的数据结构  Map(day,Map(hour,count))
+    val day2HourCountMap = new mutable.HashMap[String, mutable.HashMap[String, Long]]
+    for ((key, value) <- hour2CountMap) {
+      val dayAndHour = key.split("_")
+      val day = dayAndHour(0)
+      val hour = dayAndHour(1)
+
+      // get hourMap
+      var hourMap: mutable.HashMap[String, Long] = null
+      day2HourCountMap.get(day) match {
+        case None =>
+          hourMap = new mutable.HashMap[String, Long]
+          day2HourCountMap.put(day, hourMap)
+        case Some(map) =>
+          hourMap = map
+      }
+      hourMap.put(hour, value)
+    }
+
+    // 计算每天抽取抽取百分比 100 / session数据天数
+    val totalDayCoun = day2HourCountMap.values.size
+    if (totalDayCoun == 0) {
+      return
+    }
+    val dayRate = 100 / totalDayCoun
+
+    // 计算每小时抽取session count => (hourCount.toDouble / dayCount) * 天抽取比例
+    val hourSample2IndexMap = new mutable.HashMap[String, ListBuffer[Int]]
+    val random = new Random()
+    for ((day, hourMap) <- day2HourCountMap) {
+      val dayCount = hourMap.values.sum
+
+      // 构建每个小时随机抽取index Map(dayHour,List(randomIndex))
+      for ((hour, hourCount) <- hourMap) {
+        // 该小时应抽取数量 toInt 解决数据可能大于100
+        val hourSampleCount = (hourCount.toDouble / dayCount * dayRate).toInt
+        // 转换粒度 yyyy-MM-dd_HH
+        val hourSampleKey = day + "_" + hour
+
+        // 获取索引容器
+        var indexs: ListBuffer[Int] = null
+        hourSample2IndexMap.get(hourSampleKey) match {
+          case None =>
+            indexs = new ListBuffer[Int]
+            hourSample2IndexMap.put(hourSampleKey, indexs)
+          case Some(s_indexs) =>
+            indexs = s_indexs
+        }
+
+        // 索引集合中数据不重复
+        while (indexs.size < hourSampleCount) {
+          val randomIndex = random.nextInt(hourCount.toInt)
+          if (!indexs.contains(randomIndex)) {
+            indexs += randomIndex
+          }
+        }
+      }
+    }
+
+    // 广播变量
+    val hourSample2Index = sparkSession.sparkContext.broadcast(hourSample2IndexMap)
+
+    // 遍历全量数据，根据每小时抽取索引获取数据
+    val hour2FullInfoGroupBy = hour2FullInfo.groupByKey()
+    val extractSessionRDD = hour2FullInfoGroupBy.flatMap { case (datehour, fullInfos) =>
+      // 抽样索引集合中有匹配该日期
+      hourSample2Index.value.get(datehour) match {
+        case Some(indexs) =>
+          val fullInfoList = fullInfos.toArray
+          val extractSessionArray = new ArrayBuffer[SessionRandomExtract]
+
+          // 抽样索引获取对应索引数据并封装为 SessionRandomExtract
+          for (index <- indexs) {
+            val fullInfo = fullInfoList(index)
+            val sessionId = StringUtils.getFieldFromConcatString(fullInfo, "\\|", Constants.FIELD_SESSION_ID)
+            val startTime = StringUtils.getFieldFromConcatString(fullInfo, "\\|", Constants.FIELD_START_TIME)
+            val searchKeywords = StringUtils.getFieldFromConcatString(fullInfo, "\\|", Constants.FIELD_SEARCH_KEYWORDS)
+            val clickCategories = StringUtils.getFieldFromConcatString(fullInfo, "\\|", Constants.FIELD_CLICK_CATEGORY_IDS)
+            extractSessionArray += SessionRandomExtract(taskUUID, sessionId, startTime, searchKeywords, clickCategories)
+          }
+          extractSessionArray
+      }
+    }
+
+    // 写入mysql
+    import sparkSession.implicits._
+    extractSessionRDD.toDF().write
+      .format("jdbc")
+      .option("url", ConfigurationManager.config.getString(Constants.JDBC_URL))
+      .option("user", ConfigurationManager.config.getString(Constants.JDBC_USER))
+      .option("password", ConfigurationManager.config.getString(Constants.JDBC_PASSWORD))
+      .option("dbtable", "session_random_extract")
+      .mode(SaveMode.Append)
+      .save()
   }
 
 
