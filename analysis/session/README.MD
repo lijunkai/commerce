@@ -35,4 +35,10 @@
 ### 根据click,order,pay 获取类别top10
 * 思考过程1
     * 确认最小粒度: 类别id
-    * 
+    * 过滤没有包含类别的列  [(sessionId,fullInfo)]
+    * faltMap将一行变成多行 [(click_categoryId,1),(order_categoryId,1),(pay_categoryId,1)]
+    * reduceByKey [(click_categoryId,10),(order_categoryId,10),(pay_categoryId,10)]
+    * 转换粒度: 类别id  [(categoryId,click=10),(categoryId,order=10),(categoryId,pay=10)]
+    * reduceByKey   [(categoryId,"click=100,order=100,pay=100")]
+    * 转换为支持key排序的case class倒序排序取前10  >> CategoryOrder (CategoryOrder(clickCount, orderCount, payCount), categoryId)
+    * 转换为输出case class 输出到mysql
