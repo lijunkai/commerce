@@ -50,43 +50,79 @@ object SessionStat {
     // session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
 
     // business3: category top10 click,order,pay
-    // categoryTop10(taskUUID, sparkSession, sessionId2ActionRDD)
+    val categoryTop10 = categoryTop10Sort(taskUUID, sparkSession, sessionId2ActionRDD)
 
     // business4: session category clickCount top10
-    // session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
-    val cId_sId2ActionRDD = sessionId2ActionRDD
-      .filter { case (_, actionTable) =>
-        actionTable.click_category_id != -1
-      }
-      .map { case (sessionId, actionTable) =>
-        (actionTable.click_category_id + "_" + sessionId, 1)
-      }
-      .reduceByKey(_ + _)
-      .map { case (cId_sId, count) =>
-        val splits = cId_sId.split("_")
-        (splits(0), splits(1) + "_" + count)
-      }
-      .groupByKey()
-    val rddMap = cId_sId2ActionRDD.map { case (cId, sId_counts) =>
-      // key:count value:sid
-      val list = sId_counts.toArray.sortWith { case (x, y) =>
-        x.split("_")(1).toInt.compareTo(y.split("_")(1).toInt) > 0
+    session2categoryIdTop10(taskUUID, sparkSession, categoryTop10, sessionId2ActionRDD)
+  }
+
+  /**
+    * top10热门品类 的top10活跃session
+    *
+    * @param taskUUID
+    * @param sparkSession
+    * @param categoryTop10
+    * @return
+    */
+  def session2categoryIdTop10(taskUUID: String, sparkSession: SparkSession, categoryTop10: Array[(CategoryOrder, Long)], sessionId2ActionRDD: RDD[(String, UserVisitAction)]) = {
+    // top10 categoryIds[categoryId]
+    val categoryIdTop10 = categoryTop10.map(_._2)
+
+    // filter
+    val sessionId2ActionFilterRDD = sessionId2ActionRDD.filter { case (_, action) =>
+      action.click_category_id != -1 && categoryIdTop10.contains(action.click_category_id)
+    }
+
+    // [categoryId_sessionId,10]
+    val createId_sessionId2Reduce = sessionId2ActionFilterRDD.map { case (sessionId, action) =>
+      val categoryId = action.click_category_id
+      (s"${categoryId}_$sessionId", 1)
+    }.reduceByKey(_ + _)
+
+    // [categoryId,(sessionId,10)]
+    val createIdGroupRDD = createId_sessionId2Reduce.map { case (categoryIdAndSessionId, count) =>
+      val splits = categoryIdAndSessionId.split("_")
+      val categoryId = splits(0)
+      val sessionId = splits(1)
+      (categoryId, (sessionId, count))
+    }.groupByKey()
+
+    // [(createId, (totalCount, top10Session))]
+    val createId2TotalCountRDD = createIdGroupRDD.map { case (createId, sessions) =>
+      // sessions[] 中的count相加
+      var totalCount = 0
+      for (session <- sessions) {
+        session match {
+          case (_, clickCount) =>
+            totalCount += clickCount
+        }
       }
 
-      for (i <- list) yield {
-        println(s"cId=$cId")
-        Top10Session(taskUUID, cId.toLong, i.split("_")(0), i.split("_")(1).toLong)
+      // sessions[] 根据count倒序取前10
+      val top10Session = sessions.toList.sortWith { case ((_, count1), (_, count2)) =>
+        count1 > count2
+      }.take(10)
+      (createId, (totalCount, top10Session))
+    }
+
+    // 根据totalCount倒序排序取前10
+    val createId2Top10 = createId2TotalCountRDD.sortBy { case (_, (totalCount, _)) =>
+      -totalCount
+    }.take(10)
+
+    // Top10Session(taskUUID, createId.toLong, sessionId, clickCount)
+    val top10Session = createId2Top10.flatMap { case (createId, (_, top10Session)) =>
+      for (session <- top10Session) yield {
+        session match {
+          case (sessionId, clickCount) =>
+            Top10Session(taskUUID, createId.toLong, sessionId, clickCount)
+        }
       }
     }
-//    rddMap.sortBy { case (top10Session) =>
-//
-//      Top10Session(taskUUID, cId.toLong, i.split("_")(0), i.split("_")(1).toLong)
-//    }.take(10)
 
-
-    // 写入mysql
+    // write Mysql
     import sparkSession.implicits._
-    rddMap
+    sparkSession.sparkContext.makeRDD(top10Session)
       .toDF().write
       .format("jdbc")
       .mode(SaveMode.Append)
@@ -104,7 +140,7 @@ object SessionStat {
     * @param sparkSession
     * @param sessionId2ActionRDD
     */
-  def categoryTop10(taskUUID: String, sparkSession: SparkSession, sessionId2ActionRDD: RDD[(String, UserVisitAction)]) = {
+  def categoryTop10Sort(taskUUID: String, sparkSession: SparkSession, sessionId2ActionRDD: RDD[(String, UserVisitAction)]) = {
     // 过滤没有包含列别的列
     val sessionId2FilterCategory = sessionId2ActionRDD.filter { case (sessionId, fullInfo) =>
       var isResult = false
@@ -178,17 +214,17 @@ object SessionStat {
     }
 
     // action: 倒序排序取出前十
-    val list = categoryId2OrderClass.sortByKey(false).take(10)
+    val categoryTop10R = categoryId2OrderClass.sortByKey(false).take(10)
 
     // 转换为输出mysql case class
-    val top10Category = list.map { case (CategoryOrder(clickCount, orderCount, payCount), categoryId) =>
+    val top10Category = categoryTop10R.map { case (CategoryOrder(clickCount, orderCount, payCount), categoryId) =>
       Top10Category(taskUUID, categoryId, clickCount, orderCount, payCount)
     }
 
     // 写入mysql
     import sparkSession.implicits._
     sparkSession.sparkContext.makeRDD(top10Category)
-      .toDS().write
+      .toDF().write
       .format("jdbc")
       .mode(SaveMode.Append)
       .option("url", ConfigurationManager.config.getString(Constants.JDBC_URL))
@@ -196,6 +232,8 @@ object SessionStat {
       .option("password", ConfigurationManager.config.getString(Constants.JDBC_PASSWORD))
       .option("dbtable", "top10_category")
       .save()
+
+    categoryTop10R
   }
 
 

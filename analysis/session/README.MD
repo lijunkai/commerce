@@ -46,10 +46,12 @@
 ### top10热门品类 的top10活跃session
 * 思考过程1
     * min granularity: 
-        * categoryId_sessionId 
         * categoryId
+        * sessionId 
+    * init data
+        Top10Category(taskUUID, categoryId, clickCount, orderCount, payCount)
     * filter
-    * flatMap [categoryId_sessionId,1] 
+    * map [categoryId_sessionId,1] 
     * reduceByKey [categoryId_sessionId,10]
     * map [categoryId,sessionId_10]
     * groupByKey cId2Group [categoryId,[sessionId1_10,sessionId2_20]]
