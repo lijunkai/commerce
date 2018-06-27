@@ -1,4 +1,4 @@
-#session需求
+# session需求
 ### 各个范围Session步长、访问时长占比统计
 * 根据查询参数获取user_visit_action [sessionId:infos[]]
 * 根据sessionId将user_visit_action聚合为一条信息 [sessionId:info]
@@ -40,5 +40,24 @@
     * reduceByKey [(click_categoryId,10),(order_categoryId,10),(pay_categoryId,10)]
     * 转换粒度: 类别id  [(categoryId,click=10),(categoryId,order=10),(categoryId,pay=10)]
     * reduceByKey   [(categoryId,"click=100,order=100,pay=100")]
-    * 转换为支持key排序的case class倒序排序取前10  >> CategoryOrder (CategoryOrder(clickCount, orderCount, payCount), categoryId)
+    * 转换为支持key排序的case class倒序排序取前10 -> (CategoryOrder(clickCount, orderCount, payCount), categoryId)
     * 转换为输出case class 输出到mysql
+    
+### top10热门品类 的top10活跃session
+* 思考过程1
+    * min granularity: 
+        * categoryId_sessionId 
+        * categoryId
+    * filter
+    * flatMap [categoryId_sessionId,1] 
+    * reduceByKey [categoryId_sessionId,10]
+    * map [categoryId,sessionId_10]
+    * groupByKey cId2Group [categoryId,[sessionId1_10,sessionId2_20]]
+    * map [categoryId,(totalCount ,[sessionId1_10,sessionId2_20])]
+    * sort take [categoryId,(totalCount ,[sessionId1_10,sessionId2_20])]
+        * sortBy totalCount DESC
+        * take 10
+    * flatMap Top10Session(taskUUID, categoryId, sessionid, clickCount)
+        * sortBy sessionId1_10 DESC
+        * take 10
+    * write mysql

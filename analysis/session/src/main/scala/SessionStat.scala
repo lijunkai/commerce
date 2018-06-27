@@ -47,10 +47,54 @@ object SessionStat {
     // sessionSeptTimeRate(taskUUID, sparkSession, taskParm, sessionId2FullInfo)
 
     // business2: session 100 sample
-    session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
+    // session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
 
     // business3: category top10 click,order,pay
     // categoryTop10(taskUUID, sparkSession, sessionId2ActionRDD)
+
+    // business4: session category clickCount top10
+    // session100Sample(taskUUID, sparkSession, sessionId2FullInfo)
+    val cId_sId2ActionRDD = sessionId2ActionRDD
+      .filter { case (_, actionTable) =>
+        actionTable.click_category_id != -1
+      }
+      .map { case (sessionId, actionTable) =>
+        (actionTable.click_category_id + "_" + sessionId, 1)
+      }
+      .reduceByKey(_ + _)
+      .map { case (cId_sId, count) =>
+        val splits = cId_sId.split("_")
+        (splits(0), splits(1) + "_" + count)
+      }
+      .groupByKey()
+    val rddMap = cId_sId2ActionRDD.map { case (cId, sId_counts) =>
+      // key:count value:sid
+      val list = sId_counts.toArray.sortWith { case (x, y) =>
+        x.split("_")(1).toInt.compareTo(y.split("_")(1).toInt) > 0
+      }
+
+      for (i <- list) yield {
+        println(s"cId=$cId")
+        Top10Session(taskUUID, cId.toLong, i.split("_")(0), i.split("_")(1).toLong)
+      }
+    }
+//    rddMap.sortBy { case (top10Session) =>
+//
+//      Top10Session(taskUUID, cId.toLong, i.split("_")(0), i.split("_")(1).toLong)
+//    }.take(10)
+
+
+    // 写入mysql
+    import sparkSession.implicits._
+    rddMap
+      .toDF().write
+      .format("jdbc")
+      .mode(SaveMode.Append)
+      .option("url", ConfigurationManager.config.getString(Constants.JDBC_URL))
+      .option("user", ConfigurationManager.config.getString(Constants.JDBC_USER))
+      .option("password", ConfigurationManager.config.getString(Constants.JDBC_PASSWORD))
+      .option("dbtable", "top10_session")
+      .save()
   }
 
   /**
